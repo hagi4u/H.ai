@@ -10,7 +10,8 @@
 | `ai_identity.md` | AI(hai)의 정체성, 이름, 역할, 행동 지침 |
 | `user_profile.md` | 사용자 프로필, 직업, 기술 스택, 관심사 |
 | `schedule.md` | 일정 관리 |
-| `growth.md` | hai의 주간 성장 기록 |
+| `growth.md` | Hai의 주간 성장 기록 |
+| `error.md` | 실수 및 오류 로그 |
 
 ## 로드 순서
 
