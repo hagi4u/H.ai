@@ -6,6 +6,7 @@
   - 네이버 → 스노우 → KREAM (손자회사)
   - 서비스 프론트엔드 팀 소속
 - **역할**: 팀원 (IC, Individual Contributor)
+- **닉네임**: Bobby
 
 ## 기술 스택
 
