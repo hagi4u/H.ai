@@ -7,7 +7,7 @@
 ```vue
 <!-- 1. <script setup> (TypeScript 필수) -->
 <script setup lang="ts">
-import { ref, watch } from "vue";
+import { ref } from "vue";
 import Component from "@/components/Component.vue";
 
 interface Props {
@@ -27,10 +27,6 @@ const state = ref("");
 const handleAction = (): void => {
   emit("update", state.value);
 };
-
-watch(state, () => {
-  emit("update", state.value);
-});
 </script>
 
 <!-- 2. <template> -->
