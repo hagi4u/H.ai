@@ -49,4 +49,4 @@ div {
 - **외부 컴포넌트 사용 시**: import 후 자동으로 등록됨 (이름이 자동 매핑됨)
   - ❌ `defineComponent`로 별도 등록 불필요
 - **TypeScript**: `withDefaults()`, `defineProps<Type>()`, `defineEmits<{...}>()` 사용
-- **반응성**: `ref()`, `computed()`, `watch()`는 setup에서 직접 호출
+- **반응성**: `ref()`, `computed()`는 setup에서 직접 호출. `watch()`는 지양 (아래 gotchas 참조)
