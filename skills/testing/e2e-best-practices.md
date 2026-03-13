@@ -1,55 +1,242 @@
-# E2E 테스트 모범사례
+# E2E 테스트 작성 가이드
 
-> KREAM FE팀 E2E 레포 방향성 수립을 위한 조사 정리.
-> 적용 대상: 크림 웹(Nuxt3), 크림페이(Next.js)
-
----
-
-## 도구 선택: Playwright 권장
-
-| 항목 | Playwright | Cypress |
-|------|-----------|---------|
-| 브라우저 | Chrome, Firefox, **Safari(WebKit)** | Chrome, Edge, Firefox (Safari 없음) |
-| 병렬 실행 | 네이티브 sharding | 유료 플랜만 |
-| 멀티탭/멀티도메인 | 기본 지원 | 제한적 |
-| 결제 팝업(PG) | ✅ 리디렉션 + 팝업 처리 가능 | 어려움 |
-| Nuxt3 통합 | `@nuxt/test-utils` 공식 지원 | 별도 설정 |
-| Next.js 통합 | 공식 템플릿 존재 | 가능 |
-
-**Playwright 선택 이유 (KREAM 맥락):**
-- 모바일 사용자 비중 → Safari/WebKit 커버 필수
-- 결제 플로우 → PG사 팝업/리디렉션 처리 네이티브 지원
-- `storageState`로 로그인 세션 재사용 → 인증 반복 최소화
+> KREAM E2E 모노레포(`kream-e2e`) 기반.
+> Playwright + playwright-bdd + Gherkin(한국어).
 
 ---
 
-## 레포 구조
+## 도구 스택
+
+| 도구 | 역할 |
+|------|------|
+| **Playwright** | 브라우저 자동화, Locator API, assertion |
+| **playwright-bdd** | Gherkin feature ↔ step 바인딩 (`createBdd()`) |
+| **Chrome DevTools Protocol (CDP)** | 배포 환경에서 DOM 구조 사전 조사 |
+| **Gherkin** | 시나리오 정의 (영어 키워드 + 한국어 본문) |
+
+---
+
+## 핵심 워크플로우: CDP 조사 → Playwright Locator 작성
+
+### 왜 CDP를 먼저 사용하는가
+
+배포된 실제 페이지의 DOM 구조는 소스 코드만으로 파악하기 어렵다.
+CDP로 **실제 렌더링된 DOM, computed style, 요소 존재 여부**를 먼저 확인한 뒤,
+그 결과를 기반으로 **Playwright Locator API**로 테스트를 작성한다.
+
+### Step 1: CDP로 DOM 조사
+
+Chrome DevTools MCP 또는 Playwright의 `page.context().newCDPSession(page)`를 사용하여
+대상 페이지의 실제 DOM 상태를 확인한다.
+
+**조사 항목:**
+
+| 확인 대상 | CDP 명령 |
+|-----------|----------|
+| 요소 존재 여부 | `DOM.getDocument` → `DOM.querySelectorAll` |
+| 속성 값 | `DOM.getAttributes` |
+| Computed Style | `CSS.getComputedStyleForNode` |
+| JS 평가 | `Runtime.evaluate` |
+
+**조사 결과를 테이블로 정리:**
+
+```markdown
+| 요소 | 셀렉터 | 존재 | 주요 속성/스타일 |
+|------|--------|------|-----------------|
+| 이미지 탭 | `.media-container img` | O | alt="탭명", naturalWidth > 0 |
+| Lottie 탭 | `.media-container svg` | O | 내부 g/path 존재 |
+| 텍스트 탭 | `li.li_tab a.tab:not(:has(.media-container))` | O | textContent 존재 |
+```
+
+### Step 2: 셀렉터 상수 정의
+
+CDP 조사 결과를 기반으로 steps 파일 상단에 셀렉터를 정리한다.
+
+```typescript
+// CDP로 확인한 DOM 구조 기반 셀렉터
+const SELECTORS = {
+  mediaContainer: ".media-container",
+  mediaImage: ".media-container img",
+  mediaSvg: ".media-container svg",
+  srOnly: ".media-container .sr-only",
+  allTabs: "li.li_tab a.tab",
+  tabName: ".tab_name",
+} as const;
+```
+
+### Step 3: Playwright Locator API로 step 구현
+
+**CDP는 조사 도구일 뿐, 테스트 코드에서는 Playwright Locator API를 사용한다.**
+
+```typescript
+// DOM 요소 존재/가시성 → locator + toBeVisible
+Then("이미지 미디어 탭이 노출됨을 확인한다", async ({ page }) => {
+  const imgLocator = page.locator(SELECTORS.mediaImage);
+  await expect(imgLocator.first()).toBeVisible({ timeout: 10000 });
+  expect(await imgLocator.count()).toBeGreaterThan(0);
+});
+
+// JS 속성 확인 → locator.evaluate()
+Then("미디어 탭 이미지가 정상 로드됨을 확인한다", async ({ page }) => {
+  const images = page.locator(SELECTORS.mediaImage);
+  const count = await images.count();
+  for (let i = 0; i < count; i++) {
+    const naturalWidth = await images.nth(i).evaluate(
+      (img: HTMLImageElement) => img.naturalWidth
+    );
+    expect(naturalWidth).toBeGreaterThan(0);
+  }
+});
+
+// Computed Style 확인 → locator.evaluate(getComputedStyle)
+Then("aspect-ratio가 적용됨을 확인한다", async ({ page }) => {
+  const containers = page.locator(SELECTORS.mediaContainer);
+  const count = await containers.count();
+  for (let i = 0; i < count; i++) {
+    const aspectRatio = await containers.nth(i).evaluate(
+      (el) => getComputedStyle(el).aspectRatio
+    );
+    expect(aspectRatio).not.toBe("auto");
+  }
+});
+```
+
+### CDP 조사 ↔ Playwright 작성 매핑 정리
+
+| CDP 조사 방법 | Playwright 작성 방법 |
+|--------------|---------------------|
+| `DOM.querySelectorAll` (존재 확인) | `page.locator(selector)` + `toBeVisible()` / `.count()` |
+| `DOM.getAttributes` (속성 확인) | `locator.getAttribute()` |
+| `CSS.getComputedStyleForNode` (스타일) | `locator.evaluate(el => getComputedStyle(el).prop)` |
+| `Runtime.evaluate` (JS 값) | `locator.evaluate()` 또는 `page.evaluate()` |
+| 요소 내 자식 탐색 | `locator.locator(childSelector)` |
+| 부정 셀렉터 (요소 없음) | `:not(:has(...))` 또는 `.count()` === 0 |
+
+---
+
+## 레포 구조 & 파일 컨벤션
 
 ```
-e2e/
-├── auth/
-│   ├── login.spec.ts
-│   └── signup.spec.ts
-├── product/
-│   ├── search.spec.ts          # 검색 → 필터 → 상품 진입
-│   └── product-detail.spec.ts  # 상품 상세 → 입찰/즉시구매 CTA
-├── trade/
-│   ├── buy-now.spec.ts         # 즉시구매 플로우 (Happy Path)
-│   ├── bidding.spec.ts
-│   └── checkout.spec.ts
-├── mypage/
-│   └── order-history.spec.ts
-├── fixtures/
-│   ├── auth.fixture.ts         # 로그인 세션 fixture
-│   └── product.fixture.ts
-└── pages/                      # Page Object Model
-    ├── ProductDetailPage.ts
-    ├── CheckoutPage.ts
-    └── LoginPage.ts
+kream-e2e/
+├── features/                  ← 공유 Gherkin 시나리오
+│   └── home/
+│       ├── ranking.feature
+│       └── tab-media.feature
+├── web/
+│   ├── steps-play/            ← playwright-bdd step 구현체
+│   │   ├── home/
+│   │   │   ├── ranking.steps.ts
+│   │   │   └── tab-media.steps.ts
+│   │   ├── shared/
+│   │   │   ├── navigation.steps.ts   ← 공용 Given/When
+│   │   │   └── utils.ts
+│   │   └── base.steps.ts     ← 전역 공용 step
+│   ├── fixture/               ← auth storageState
+│   └── playwright.config.ts
+├── mweb/                      ← 모바일 웹 E2E
+└── common/inventory/          ← 테스트 사용자 데이터
 ```
 
-**원칙: 피처 기반 파일 구분 + 유저 시나리오 관점으로 작성**
-- E2E는 Happy Path 중심, 예외/에러 케이스는 Unit/Integration에 위임
+**매핑 규칙:**
+- `features/{domain}/{name}.feature` ↔ `web/steps-play/{domain}/{name}.steps.ts`
+- 공용 step (페이지 열기, 스크롤, 대기 등)은 `shared/` 또는 `base.steps.ts`에 정의
+- 중복 step 정의 금지 — 기존 step 확인 후 작성
+
+---
+
+## Feature 파일 작성 규칙
+
+```gherkin
+@tab-media
+Feature: HOME 탭 미디어(Lottie/이미지) 검증
+  홈 탭의 Lottie 애니메이션과 이미지 미디어가 정상 동작하는지 검증한다
+
+  Background:
+    Given "/" 페이지를 연다
+
+  @web @P0 @logout
+  Scenario: 이미지 미디어 탭이 정상 렌더링된다
+    Then 이미지 미디어 탭이 노출됨을 확인한다
+    And 미디어 탭 이미지가 정상 로드됨을 확인한다
+```
+
+| 규칙 | 설명 |
+|------|------|
+| 키워드 | **영어** (`Feature`, `Scenario`, `Given`, `When`, `Then`) |
+| 본문 | **한국어** |
+| Feature 태그 | 도메인 식별자 (`@tab-media`, `@ranking`) |
+| Scenario 태그 | 플랫폼 + 우선순위 + 인증 (`@web @P0 @logout`) |
+| Background | 공통 전제조건 (페이지 열기 등) |
+| `@P0` | 스모크 — PR마다 실행 |
+| `@P1` | 회귀 — merge 후 전체 |
+| `@P2` | 보조 — 야간 cron |
+
+---
+
+## Steps 파일 작성 패턴
+
+```typescript
+import { expect } from "@playwright/test";
+import { createBdd } from "playwright-bdd";
+
+const { Given, When, Then } = createBdd();
+
+// 1. CDP 조사 기반 셀렉터 상수
+const SELECTORS = { ... } as const;
+
+// 2. When: 사용자 액션
+When("페이지를 하단으로 스크롤한다", async ({ page }) => {
+  await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+  await page.waitForTimeout(500);
+});
+
+// 3. Then: 검증 (Playwright assertion)
+Then("이미지가 노출됨을 확인한다", async ({ page }) => {
+  await expect(page.locator(SELECTORS.image).first()).toBeVisible();
+});
+```
+
+**작성 원칙:**
+- `page.locator()` + `expect(locator)` 우선 사용
+- DOM 속성/스타일 확인이 필요하면 `locator.evaluate()` 사용
+- `page.evaluate()`는 스크롤 등 부수효과 액션에만 사용
+- CDP 직접 호출(`newCDPSession`)은 테스트 코드에 넣지 않음
+- `waitForTimeout`은 스크롤 안정화 등 최소한으로만 사용 (500ms 이하)
+
+---
+
+## 실행 명령어
+
+```bash
+cd ~/Developments/kream-e2e/web
+
+# feature → spec 생성
+pnpm bddgen
+
+# 전체 실행
+pnpm play
+
+# 태그 필터링
+npx playwright test --grep @tab-media
+
+# 스모크 (P0)
+pnpm test:smoke
+
+# UI 모드 (디버깅)
+npx playwright test --ui
+```
+
+---
+
+## 새 테스트 추가 체크리스트
+
+1. **CDP로 대상 페이지 DOM 조사** → 셀렉터, 속성, 스타일 확인
+2. **조사 결과를 테이블로 정리** → 어떤 요소가 어떤 상태인지 기록
+3. **`features/{domain}/{name}.feature` 작성** → 시나리오 정의
+4. **기존 step 검색** → `shared/`, `base.steps.ts`에 이미 있는지 확인
+5. **`steps-play/{domain}/{name}.steps.ts` 작성** → 셀렉터 상수 + Locator API
+6. **`pnpm bddgen`** → spec 파일 생성
+7. **`npx playwright test --grep @태그`** → 실행 확인
 
 ---
 
@@ -57,63 +244,20 @@ e2e/
 
 ### 태그 기반 분리
 
-```typescript
-test('즉시구매 핵심 플로우 @smoke', ...)       // PR마다 실행 (~3분 목표)
-test('전체 결제 시나리오 @regression', ...)    // merge 후 전체 회귀
-test('실계좌 결제 테스트 @local-only', ...)    // CI 제외, 로컬만
-```
+| 트리거 | 실행 범위 | 태그 |
+|--------|---------|------|
+| PR 오픈/업데이트 | 스모크 | `@P0 @web` |
+| main merge | 전체 회귀 | `@web` 전체 |
+| 야간 cron | 다중 브라우저 | 전체 |
 
-### CI 트리거별 범위
+### 환경 변수
 
-| 트리거 | 실행 범위 | 목표 시간 |
-|--------|---------|---------|
-| PR 오픈/업데이트 | `@smoke` 태그만 | ~3분 |
-| main 브랜치 merge | `@regression` 전체 | sharding으로 ~10분 |
-| 야간 cron | 전체 + 다중 브라우저 | 제한 없음 |
-
-### 환경 파일 분리
-
-```
-.env.local    # 개인 테스트 계정, 실제 스테이징 URL
-.env.ci       # CI 전용 계정, 마스킹된 데이터
-.env.staging  # 스테이징 검증
-```
-
-`.env*` 전체 `.gitignore` 등록 필수. CI 시크릿은 GitHub Actions Secrets로 관리.
-
----
-
-## 민감 데이터 처리
-
-1. **전용 테스트 계정** — 실 사용자 데이터 절대 금지
-2. **결제 데이터** — PG사 테스트 카드 번호 사용 (`4242 4242 4242 4242` 류), Sandbox 환경 활용
-3. **실계좌 연동** — `@local-only` 태그로 분리, CI 실행 제외
-4. **스크린샷/trace 마스킹** — 카드번호, 개인정보 필드는 `maskTextContent` 옵션 활용
-
----
-
-## BDD(Gherkin/Cucumber) 미사용
-
-**도입하지 않는다.**
-
-Gherkin은 QA/기획자가 시나리오를 직접 작성할 때 의미가 있다.
-KREAM FE팀은 시나리오 정의와 코드 작성 모두 FE가 주도하므로 불필요한 레이어다.
-
-- 기존 `kream-e2e` 레포(Cucumber 기반)는 QA 중심 설계 → 참조하지 않음
-- 개발자 친화적인 Playwright 네이티브 방식으로 작성
-
-**작성 스타일** — 주석으로 의도 명시:
-```typescript
-test('상품 즉시구매 후 주문 완료 확인', async ({ page }) => {
-  // Given: 로그인된 사용자
-  await loginUser(page, testUser)
-  // When: 상품 즉시구매 플로우 실행
-  await page.goto('/products/12345')
-  await page.getByRole('button', { name: '즉시구매' }).click()
-  // Then: 주문 완료 페이지 확인
-  await expect(page.getByText('주문이 완료되었습니다')).toBeVisible()
-})
-```
+| 변수 | 용도 |
+|------|------|
+| `E2E_BASE_URL` | 테스트 대상 URL (dev-branch-8 등) |
+| `E2E_USER_ID` | 인벤토리 사용자 ID |
+| `E2E_VIDEO` | 비디오 녹화 (`on`) |
+| `BROWSER` | 브라우저 선택 |
 
 ---
 
@@ -121,67 +265,17 @@ test('상품 즉시구매 후 주문 완료 확인', async ({ page }) => {
 
 | 역할 | QA팀 | FE팀 |
 |------|------|------|
-| 테스트 시나리오 정의 | **리뷰어** (누락 케이스 검토) | 주도 |
-| 테스트 코드 작성 | — | 주도 |
-| CI 파이프라인 설정 | — | 주도 |
-| 회귀 테스트 실행 | 주도 (FE가 만든 E2E 실행) | 환경 지원 |
-| 실패 시 분석 | 버그 판별 | 코드/환경 이슈 판별 |
-| UI 변경 시 업데이트 | 알림 | 즉시 수정 |
-
-- 시나리오 작성은 FE 주도, QA는 리뷰어로 참여 (직접 실행하는 역할이므로 누락 케이스를 가장 잘 발견)
-- FE가 E2E를 만들면 QA는 그것을 회귀 검증 수단으로 활용
-- 자동화 커버된 케이스는 QA 수동 회귀 목록에서 제외 → QA 리소스 확보
-
-## 유관자 미팅
-
-> Bobby가 주관해서 유관자를 모아 이 방향성을 공유하고 합의할 예정.
-
-**미팅 목적**: E2E 도입 방향성 공유 및 역할 합의
-**예상 참석자**: FE팀, QA팀 (유관자)
-**상태**: 🔜 예정
+| Feature 시나리오 정의 | 리뷰어 (누락 케이스 검토) | 주도 |
+| Steps 코드 작성 | — | 주도 |
+| CI 파이프라인 | — | 주도 |
+| 회귀 테스트 실행 | 주도 | 환경 지원 |
+| 실패 분석 | 버그 판별 | 코드/환경 이슈 판별 |
 
 ---
 
-## 커버리지 가시화
+## 민감 데이터 처리
 
-### Playwright 내장 도구
-```bash
-npx playwright test --reporter=html
-npx playwright show-report  # 통과/실패/스킵 시각화
-```
-
-- **Trace Viewer**: 스텝별 스크린샷 + 네트워크 요청 + 콘솔 타임라인
-- `--reporter=github` 플래그로 PR 코멘트 자동화
-
-### 커버리지 매핑 테이블 (팀 관리용)
-
-```
-플로우                 | 자동화 | 태그          | 담당
-──────────────────────────────────────────────────
-로그인 (이메일)        | ✅     | @smoke        | FE
-로그인 (소셜)          | ❌     |               |
-상품 검색 → 필터       | ✅     | @smoke        | FE
-즉시구매 (카드)        | ✅     | @regression   | FE
-입찰 → 낙찰           | ❌     |               |
-마이페이지 주문내역    | 🔄     |               | QA
-```
-
----
-
-## 실행 로드맵 (KREAM FE팀)
-
-### Phase 1 (1~2개월): 기반 구축
-- 별도 E2E 레포 생성 (메인 레포와 분리)
-- Playwright 세팅 + `@nuxt/test-utils` 통합
-- 핵심 Happy Path 3~5개: 로그인, 상품 상세 진입, 즉시구매
-- `.env.local` / `.env.ci` 분리 + GitHub Secrets 연동
-
-### Phase 2 (3~4개월): 확장
-- `@smoke` / `@regression` 태그 체계 수립
-- QA팀과 커버리지 매핑 테이블 작성
-- PR 스모크 자동화 + 야간 전체 회귀 실행
-
-### Phase 3: 최적화
-- HTML Report → Slack 알림 연동
-- BDD 도입 재검토
-- 결제 시나리오 → PG Sandbox 완전 자동화
+1. **전용 테스트 계정** — 실 사용자 데이터 절대 금지
+2. **결제 데이터** — PG사 테스트 카드 + Sandbox 환경
+3. **`.env*` 전체 `.gitignore`** — CI 시크릿은 GitHub Actions Secrets
+4. **사용자 인벤토리** — `common/inventory/` JSON 파일, `${user1.email}` 형태로 참조
